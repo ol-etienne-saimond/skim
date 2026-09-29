@@ -27,31 +27,51 @@ fn list(n: usize) -> ItemList {
     il
 }
 
-#[test]
-fn selection_and_selected_skip_disabled_items() {
-    use std::borrow::Cow;
-
-    // An item flagged disabled (as `--disable-pattern` does) cannot become the
-    // selection, so accepting it yields no output.
-    struct Disabled(&'static str);
-    impl crate::SkimItem for Disabled {
-        fn text(&self) -> Cow<'_, str> {
-            Cow::Borrowed(self.0)
-        }
-        fn disabled(&self) -> bool {
-            true
-        }
+// An item flagged disabled (as `--disable-pattern` does) cannot become the
+// selection, so accepting it yields no output.
+struct Disabled(&'static str);
+impl crate::SkimItem for Disabled {
+    fn text(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(self.0)
     }
+    fn disabled(&self) -> bool {
+        true
+    }
+}
 
-    let rb = RankBuilder::default();
-    let disabled = MatchedItem::new(
-        std::sync::Arc::new(Disabled("foo")) as std::sync::Arc<dyn crate::SkimItem>,
+fn disabled_item(text: &'static str) -> MatchedItem {
+    MatchedItem::new(
+        std::sync::Arc::new(Disabled(text)) as std::sync::Arc<dyn crate::SkimItem>,
         Rank::default(),
         None,
-        &rb,
-    );
+        &RankBuilder::default(),
+    )
+}
+
+/// `n` ordinary items, with the one at `disabled_at` replaced by a disabled
+/// one -- for the navigation tests below (`scroll_by`/`jump_to_first`/
+/// `jump_to_last` all need to skip over it rather than land the cursor
+/// there).
+fn list_with_disabled_at(disabled_at: usize, n: usize) -> ItemList {
+    let mut items: Vec<MatchedItem> = (0..n)
+        .map(|i| {
+            if i == disabled_at {
+                disabled_item("heading")
+            } else {
+                matched(&format!("item{i}"), i32::try_from(i).unwrap())
+            }
+        })
+        .collect();
     let mut il = ItemList::default();
-    il.append(&mut vec![disabled, matched("bar", 1)]);
+    il.append(&mut items);
+    il.height = 10;
+    il
+}
+
+#[test]
+fn selection_and_selected_skip_disabled_items() {
+    let mut il = ItemList::default();
+    il.append(&mut vec![disabled_item("foo"), matched("bar", 1)]);
     il.height = 10;
 
     // Cursor on the disabled row: `selected()` returns nothing.
@@ -67,6 +87,63 @@ fn selection_and_selected_skip_disabled_items() {
     il.toggle_at(1);
     assert_eq!(il.selection.len(), 1);
     assert_eq!(il.selection[0].text(), "bar");
+}
+
+// `disabled()` alone (the tests above) only stops an item from being
+// *accepted* -- it says nothing about the cursor being able to rest on one
+// while navigating, which visually looks exactly as "selectable" as a real
+// row until you press Enter there. These cover the actual keyboard paths
+// (Up/Down/PageUp/PageDown all funnel through `scroll_by`; Home/End through
+// `jump_to_first`/`jump_to_last`) skipping straight over a disabled item
+// instead of landing on it.
+
+#[test]
+fn scroll_by_skips_a_disabled_item_when_moving_down() {
+    let mut il = list_with_disabled_at(2, 5);
+    il.current = 1;
+    il.scroll_by(1); // naively lands on index 2 (disabled)
+    assert_eq!(il.current, 3);
+}
+
+#[test]
+fn scroll_by_skips_a_disabled_item_when_moving_up() {
+    let mut il = list_with_disabled_at(2, 5);
+    il.current = 3;
+    il.scroll_by(-1); // naively lands on index 2 (disabled)
+    assert_eq!(il.current, 1);
+}
+
+#[test]
+fn scroll_by_falls_back_to_the_other_direction_when_disabled_runs_to_the_edge() {
+    // Nothing selectable below index 3 (4 is disabled, and it's the last
+    // item) -- must fall back to searching upward instead of clamping onto
+    // the disabled row at the edge.
+    let mut il = list_with_disabled_at(4, 5);
+    il.current = 3;
+    il.scroll_by(1);
+    assert_eq!(il.current, 3, "no selectable item below -- cursor should stay put, not land on the disabled edge");
+}
+
+#[test]
+fn jump_to_first_skips_a_leading_disabled_item() {
+    let mut il = list_with_disabled_at(0, 5);
+    il.jump_to_first();
+    assert_eq!(il.current, 1);
+}
+
+#[test]
+fn jump_to_last_skips_a_trailing_disabled_item() {
+    let mut il = list_with_disabled_at(4, 5);
+    il.jump_to_last();
+    assert_eq!(il.current, 3);
+}
+
+#[test]
+fn nearest_selectable_falls_back_to_from_when_everything_is_disabled() {
+    // Degenerate case (a list of headings and nothing else): must not
+    // panic or return an out-of-bounds index.
+    let all_disabled: Vec<MatchedItem> = (0..3).map(|_| disabled_item("x")).collect();
+    assert_eq!(ItemList::nearest_selectable(&all_disabled, 1, 0, true), 1);
 }
 
 #[test]

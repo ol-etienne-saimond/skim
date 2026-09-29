@@ -239,6 +239,26 @@ impl ItemList {
         }
     }
 
+    /// Nearest index to `from` whose item isn't `disabled()` -- searches
+    /// forward first if `prefer_forward`, else backward first, falling back
+    /// to the other direction if that way runs out before finding one, and
+    /// finally to `from` itself if every item turns out to be disabled
+    /// (degenerate, but must never go out of bounds or panic). Used
+    /// everywhere `current` gets set to keep the cursor off a disabled item
+    /// (a non-selectable section heading, e.g.) -- `disabled()` on its own
+    /// only stops it from being *selected*, not landed on while navigating.
+    fn nearest_selectable(items: &[MatchedItem], from: usize, reserved: usize, prefer_forward: bool) -> usize {
+        let disabled_at = |i: usize| items.get(i).is_some_and(|item| item.item.disabled());
+        if !disabled_at(from) {
+            return from;
+        }
+        let forward = (from..items.len()).find(|&i| !disabled_at(i));
+        let last = items.len().saturating_sub(1);
+        let backward = (reserved..=from.min(last)).rev().find(|&i| !disabled_at(i));
+        let (primary, secondary) = if prefer_forward { (forward, backward) } else { (backward, forward) };
+        primary.or(secondary).unwrap_or(from)
+    }
+
     /// Scrolls the list by the given offset
     pub fn scroll_by(&mut self, offset: i32) {
         if self.reserved >= self.items.len() {
@@ -253,7 +273,8 @@ impl ItemList {
         } else {
             new = new.min(total - 1).max(reserved);
         }
-        self.current = new.max(0).unsigned_abs() as usize;
+        let new = new.max(0).unsigned_abs() as usize;
+        self.current = Self::nearest_selectable(&self.items, new, self.reserved, offset >= 0);
         debug!("Scrolled to {}", self.current);
         debug!("Selection: {:?}", self.selection);
     }
@@ -268,7 +289,7 @@ impl ItemList {
     /// Jump to the first selectable item (respecting reserved header lines)
     pub fn jump_to_first(&mut self) {
         if self.items.len() > self.reserved {
-            self.current = self.reserved;
+            self.current = Self::nearest_selectable(&self.items, self.reserved, self.reserved, true);
             self.offset = self.reserved;
             self.sub_offset = 0;
         }
@@ -313,7 +334,8 @@ impl ItemList {
     /// Jump to the last item in the list
     pub fn jump_to_last(&mut self) {
         if !self.items.is_empty() {
-            self.current = self.items.len().saturating_sub(1);
+            let last = self.items.len().saturating_sub(1);
+            self.current = Self::nearest_selectable(&self.items, last, self.reserved, false);
             self.sub_offset = 0;
         }
     }
@@ -501,6 +523,12 @@ impl SkimWidget for ItemList {
             this.offset = 0;
         } else {
             this.current = this.current.min(this.items.len() - 1).max(this.reserved);
+            // Covers the two cases scroll_by/jump_to_first/jump_to_last
+            // don't: the very first render (current starts at 0, which may
+            // be a disabled item -- a non-selectable section heading, e.g.)
+            // and a query/result-set change landing current on one that
+            // wasn't disabled a moment ago.
+            this.current = Self::nearest_selectable(&this.items, this.current, this.reserved, true);
         }
 
         if this.current < this.offset {
